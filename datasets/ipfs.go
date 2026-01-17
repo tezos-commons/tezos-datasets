@@ -159,10 +159,24 @@ func (d *IPFSDataset) Start() {
 
 // Stop stops all workers
 func (d *IPFSDataset) Stop() {
+	log.Printf("IPFS: stopping workers...")
 	d.cancel()
 	close(d.discoverChan)
-	// Don't close todoChan - coordinator will stop sending when ctx is done
-	d.workerWg.Wait()
+
+	// Wait for workers with timeout
+	done := make(chan struct{})
+	go func() {
+		d.workerWg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		log.Printf("IPFS: all workers stopped")
+	case <-time.After(5 * time.Second):
+		log.Printf("IPFS: timeout waiting for workers, continuing shutdown")
+	}
+
 	close(d.todoChan)
 }
 

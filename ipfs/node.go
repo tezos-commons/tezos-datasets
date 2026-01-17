@@ -324,21 +324,27 @@ func (n *Node) Close() error {
 		n.cancel()
 
 		if n.dht != nil {
+			log.Printf("IPFS: closing DHT...")
 			if e := n.dht.Close(); e != nil {
 				err = e
 			}
+			log.Printf("IPFS: DHT closed")
 		}
 
 		if n.host != nil {
+			log.Printf("IPFS: closing libp2p host...")
 			if e := n.host.Close(); e != nil && err == nil {
 				err = e
 			}
+			log.Printf("IPFS: libp2p host closed")
 		}
 
 		if n.ds != nil {
+			log.Printf("IPFS: closing datastore...")
 			if e := n.ds.Close(); e != nil && err == nil {
 				err = e
 			}
+			log.Printf("IPFS: datastore closed")
 		}
 
 		log.Printf("IPFS: node shut down")
