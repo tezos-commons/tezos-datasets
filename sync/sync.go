@@ -117,7 +117,14 @@ func (s *Syncer) Run(ctx context.Context) error {
 	// Start IPFS workers if enabled
 	if s.ipfsDS != nil {
 		s.ipfsDS.Start()
+		// On shutdown: first close IPFS node to cancel in-flight requests,
+		// then stop workers (which will now exit quickly)
 		defer s.ipfsDS.Stop()
+		defer func() {
+			if s.ipfsNode != nil {
+				s.ipfsNode.Close()
+			}
+		}()
 	}
 
 	ticker := time.NewTicker(PollInterval)

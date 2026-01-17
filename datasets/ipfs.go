@@ -375,6 +375,13 @@ func tryHexDecode(s string) string {
 
 // fetchCID fetches content from the embedded IPFS node and stores as CAR
 func (d *IPFSDataset) fetchCID(cidStr string) {
+	// Check if we're shutting down before starting expensive operation
+	select {
+	case <-d.ctx.Done():
+		return
+	default:
+	}
+
 	if d.node == nil {
 		log.Printf("IPFS: node not initialized, skipping %s", cidStr)
 		return

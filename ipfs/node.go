@@ -193,6 +193,13 @@ func (n *Node) bootstrap() error {
 
 // FetchCAR fetches content by CID and returns it as CAR data
 func (n *Node) FetchCAR(cidStr string) ([]byte, error) {
+	// Check if node is shutting down
+	select {
+	case <-n.ctx.Done():
+		return nil, n.ctx.Err()
+	default:
+	}
+
 	// Parse the CID
 	c, err := cid.Decode(cidStr)
 	if err != nil {
