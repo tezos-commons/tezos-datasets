@@ -13,6 +13,7 @@ import (
 	"tezos-datasets/config"
 	"tezos-datasets/datasets"
 	"tezos-datasets/fetcher"
+	"tezos-datasets/ipfs"
 	"tezos-datasets/node"
 )
 
@@ -33,6 +34,7 @@ type Syncer struct {
 	blocksDS     *datasets.BlocksDataset
 	contractsDS  *datasets.ContractsDataset
 	ipfsDS       *datasets.IPFSDataset
+	ipfsNode     *ipfs.Node
 	outputDir    string
 	lastBlockN   int64
 }
@@ -44,6 +46,7 @@ func NewSyncer(cfg *config.Config) (*Syncer, error) {
 	var blocksDS *datasets.BlocksDataset
 	var contractsDS *datasets.ContractsDataset
 	var ipfsDS *datasets.IPFSDataset
+	var ipfsNode *ipfs.Node
 	var err error
 
 	if cfg.EnableBlocks {
@@ -60,9 +63,21 @@ func NewSyncer(cfg *config.Config) (*Syncer, error) {
 		}
 	}
 
-	if cfg.EnableIPFS && len(cfg.IPFSNodes) > 0 {
-		ipfsDS, err = datasets.NewIPFSDataset(cfg.OutputDir, cfg.IPFSNodes)
+	if cfg.EnableIPFS {
+		// Create embedded IPFS node
+		nodeConfig := ipfs.DefaultNodeConfig()
+		if len(cfg.IPFSBootstrapPeers) > 0 {
+			nodeConfig.BootstrapPeers = cfg.IPFSBootstrapPeers
+		}
+
+		ipfsNode, err = ipfs.NewNode(context.Background(), nodeConfig)
 		if err != nil {
+			return nil, fmt.Errorf("failed to create IPFS node: %w", err)
+		}
+
+		ipfsDS, err = datasets.NewIPFSDataset(cfg.OutputDir, ipfsNode)
+		if err != nil {
+			ipfsNode.Close()
 			return nil, fmt.Errorf("failed to create IPFS dataset: %w", err)
 		}
 	}
@@ -76,6 +91,7 @@ func NewSyncer(cfg *config.Config) (*Syncer, error) {
 		blocksDS:    blocksDS,
 		contractsDS: contractsDS,
 		ipfsDS:      ipfsDS,
+		ipfsNode:    ipfsNode,
 		outputDir:   cfg.OutputDir,
 	}
 
@@ -242,5 +258,8 @@ func (s *Syncer) Close() {
 	}
 	if s.ipfsDS != nil {
 		s.ipfsDS.Close()
+	}
+	if s.ipfsNode != nil {
+		s.ipfsNode.Close()
 	}
 }

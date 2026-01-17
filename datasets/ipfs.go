@@ -5,9 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -17,6 +15,7 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 
+	"tezos-datasets/ipfs"
 	"tezos-datasets/parser"
 
 	"github.com/Jeffail/gabs/v2"
@@ -51,8 +50,8 @@ var (
 // IPFSDataset handles extracting and storing IPFS metadata
 type IPFSDataset struct {
 	db           *sql.DB
-	ipfsNodes    []string
-	httpClient   *http.Client
+	dbMu         sync.Mutex // Protects database writes
+	node         *ipfs.Node
 	cidCache     *LRUCache
 	todoChan     chan string
 	discoverChan chan []byte
@@ -62,22 +61,32 @@ type IPFSDataset struct {
 }
 
 // NewIPFSDataset creates a new IPFS metadata dataset
-func NewIPFSDataset(outputDir string, ipfsNodes []string) (*IPFSDataset, error) {
+func NewIPFSDataset(outputDir string, node *ipfs.Node) (*IPFSDataset, error) {
 	ipfsDir := filepath.Join(outputDir, "ipfs")
 	if err := os.MkdirAll(ipfsDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create ipfs directory: %w", err)
 	}
 
 	dbPath := filepath.Join(ipfsDir, "metadata.sqlite")
-	db, err := sql.Open("sqlite3", dbPath)
+	// Configure SQLite for concurrent access:
+	// - _journal_mode=WAL: Write-Ahead Logging for better concurrency
+	// - _busy_timeout=10000: Wait up to 10 seconds if database is locked
+	// - _synchronous=NORMAL: Good balance of safety and performance
+	// - _cache_size=-64000: 64MB cache
+	dsn := fmt.Sprintf("%s?_journal_mode=WAL&_busy_timeout=10000&_synchronous=NORMAL&_cache_size=-64000", dbPath)
+	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
+	// Limit connections to 1 for writes to avoid lock contention
+	// SQLite only supports one writer at a time anyway
+	db.SetMaxOpenConns(1)
+
 	// Create table if not exists
 	// content_length = 0 AND data IS NULL means pending
 	// content_length > 0 AND data IS NULL means too large
-	// content_length > 0 AND data IS NOT NULL means fetched
+	// content_length > 0 AND data IS NOT NULL means fetched (CAR data)
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS metadata (
 			cid TEXT PRIMARY KEY,
@@ -119,11 +128,8 @@ func NewIPFSDataset(outputDir string, ipfsNodes []string) (*IPFSDataset, error) 
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &IPFSDataset{
-		db:        db,
-		ipfsNodes: ipfsNodes,
-		httpClient: &http.Client{
-			Timeout: IPFSFetchTimeout,
-		},
+		db:           db,
+		node:         node,
 		cidCache:     cidCache,
 		todoChan:     make(chan string, IPFSFetchWorkers*2),
 		discoverChan: make(chan []byte, IPFSDiscoveryWorkers*2),
@@ -329,7 +335,9 @@ func (d *IPFSDataset) discoverCIDs(blockData []byte) {
 
 		// Try to insert as pending (content_length=0, data=NULL)
 		// INSERT OR IGNORE will skip if already exists
+		d.dbMu.Lock()
 		result, err := d.db.Exec("INSERT OR IGNORE INTO metadata (cid, content_length) VALUES (?, 0)", cid)
+		d.dbMu.Unlock()
 		if err != nil {
 			continue
 		}
@@ -365,99 +373,59 @@ func tryHexDecode(s string) string {
 	return string(decoded)
 }
 
-// fetchCID fetches content from IPFS nodes
-func (d *IPFSDataset) fetchCID(cid string) {
-	if len(d.ipfsNodes) == 0 {
-		log.Printf("IPFS: no nodes configured, skipping %s", cid)
+// fetchCID fetches content from the embedded IPFS node and stores as CAR
+func (d *IPFSDataset) fetchCID(cidStr string) {
+	if d.node == nil {
+		log.Printf("IPFS: node not initialized, skipping %s", cidStr)
 		return
 	}
 
 	// Double-check if still pending
 	var contentLength int64
-	err := d.db.QueryRow("SELECT content_length FROM metadata WHERE cid = ?", cid).Scan(&contentLength)
+	err := d.db.QueryRow("SELECT content_length FROM metadata WHERE cid = ?", cidStr).Scan(&contentLength)
 	if err != nil || contentLength > 0 {
 		// Already fetched or doesn't exist
 		return
 	}
 
-	log.Printf("IPFS: fetching %s", cid)
+	log.Printf("IPFS: fetching %s (connected to %d peers)", cidStr, d.node.PeerCount())
 
-	var data []byte
-	var fetchedLength int64
-	var fetchErr error
-
-	// Try each IPFS node in order
-	for _, node := range d.ipfsNodes {
-		url := fmt.Sprintf("%s/ipfs/%s", strings.TrimRight(node, "/"), cid)
-
-		ctx, cancel := context.WithTimeout(d.ctx, IPFSFetchTimeout)
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-		if err != nil {
-			cancel()
-			continue
-		}
-
-		resp, err := d.httpClient.Do(req)
-		if err != nil {
-			cancel()
-			fetchErr = err
-			continue
-		}
-
-		fetchedLength = resp.ContentLength
-
-		if resp.StatusCode == http.StatusOK {
-			// Read up to MaxContentSize + 1 to detect if it's too large
-			limitReader := io.LimitReader(resp.Body, MaxContentSize+1)
-			data, err = io.ReadAll(limitReader)
-			resp.Body.Close()
-			cancel()
-
-			if err != nil {
-				fetchErr = err
-				continue
-			}
-
-			// If we got more than MaxContentSize, set data to nil (too large)
-			if int64(len(data)) > MaxContentSize {
-				if fetchedLength <= 0 {
-					fetchedLength = int64(len(data))
-				}
-				data = nil
-			} else {
-				fetchedLength = int64(len(data))
-			}
-			fetchErr = nil
-			break
-		}
-
-		resp.Body.Close()
-		cancel()
-		fetchErr = fmt.Errorf("status %d", resp.StatusCode)
-	}
-
-	if fetchErr != nil {
-		log.Printf("IPFS: failed to fetch %s: %v (will retry)", cid, fetchErr)
+	// Fetch as CAR data from the embedded node
+	carData, err := d.node.FetchCAR(cidStr)
+	if err != nil {
+		log.Printf("IPFS: failed to fetch %s: %v (will retry)", cidStr, err)
 		return
 	}
 
+	fetchedLength := int64(len(carData))
+	var dataToStore []byte
+
+	// If CAR data exceeds MaxContentSize, store metadata only
+	if fetchedLength > MaxContentSize {
+		dataToStore = nil
+	} else {
+		dataToStore = carData
+	}
+
 	// Update in database
+	d.dbMu.Lock()
 	_, err = d.db.Exec(
 		"UPDATE metadata SET content_length = ?, data = ? WHERE cid = ?",
-		fetchedLength, data, cid,
+		fetchedLength, dataToStore, cidStr,
 	)
+	d.dbMu.Unlock()
 	if err != nil {
-		log.Printf("IPFS: failed to store %s: %v", cid, err)
+		log.Printf("IPFS: failed to store %s: %v", cidStr, err)
 		return
 	}
 
 	// Add to cache
-	d.cidCache.Add(cid)
+	d.cidCache.Add(cidStr)
 
-	if data != nil {
-		log.Printf("IPFS: fetched %s (%d bytes)", cid, fetchedLength)
+	if dataToStore != nil {
+		log.Printf("IPFS: fetched %s as CAR (%d bytes)", cidStr, fetchedLength)
 	} else {
-		log.Printf("IPFS: fetched %s (too large: %d bytes, stored metadata only)", cid, fetchedLength)
+		log.Printf("IPFS: fetched %s (too large: %d bytes, stored metadata only)", cidStr, fetchedLength)
 	}
 }
 

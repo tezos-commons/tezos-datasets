@@ -15,14 +15,14 @@ import (
 )
 
 var (
-	nodeAddrs       []string
-	numFetchers     int
-	outputDir       string
-	enableBlocks    bool
-	enableContracts bool
-	enableIPFS      bool
-	ipfsNodes       []string
-	startFrom       int64
+	nodeAddrs          []string
+	numFetchers        int
+	outputDir          string
+	enableBlocks       bool
+	enableContracts    bool
+	enableIPFS         bool
+	ipfsBootstrapPeers []string
+	startFrom          int64
 )
 
 func main() {
@@ -41,8 +41,8 @@ func main() {
 	rootCmd.Flags().StringVar(&outputDir, "output-dir", "./output", "Output directory for datasets")
 	rootCmd.Flags().BoolVar(&enableBlocks, "blocks", false, "Enable blocks dataset (LZ4 compressed)")
 	rootCmd.Flags().BoolVar(&enableContracts, "contracts", false, "Enable contracts dataset (SQLite)")
-	rootCmd.Flags().BoolVar(&enableIPFS, "ipfs-metadata", false, "Enable IPFS metadata dataset (SQLite)")
-	rootCmd.Flags().StringArrayVar(&ipfsNodes, "ipfs-node", nil, "IPFS node gateway URL(s) for fetching content")
+	rootCmd.Flags().BoolVar(&enableIPFS, "ipfs-metadata", false, "Enable IPFS metadata dataset (embedded IPFS node)")
+	rootCmd.Flags().StringArrayVar(&ipfsBootstrapPeers, "ipfs-bootstrap", nil, "Custom IPFS bootstrap peers (optional, uses defaults if not specified)")
 	rootCmd.Flags().Int64Var(&startFrom, "start-from", -1, "Start from specific block level (default: resume from saved state)")
 
 	if err := rootCmd.Execute(); err != nil {
@@ -66,20 +66,15 @@ func run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("at least one dataset must be enabled (--blocks, --contracts, or --ipfs-metadata)")
 	}
 
-	// Validate IPFS configuration
-	if enableIPFS && len(ipfsNodes) == 0 {
-		return fmt.Errorf("--ipfs-node is required when --ipfs-metadata is enabled")
-	}
-
 	cfg := &config.Config{
-		NodeAddresses:   expandedAddrs,
-		NumFetchers:     numFetchers,
-		OutputDir:       outputDir,
-		EnableBlocks:    enableBlocks,
-		EnableContracts: enableContracts,
-		EnableIPFS:      enableIPFS,
-		IPFSNodes:       ipfsNodes,
-		StartFrom:       startFrom,
+		NodeAddresses:      expandedAddrs,
+		NumFetchers:        numFetchers,
+		OutputDir:          outputDir,
+		EnableBlocks:       enableBlocks,
+		EnableContracts:    enableContracts,
+		EnableIPFS:         enableIPFS,
+		IPFSBootstrapPeers: ipfsBootstrapPeers,
+		StartFrom:          startFrom,
 	}
 
 	log.Printf("Configuration:")

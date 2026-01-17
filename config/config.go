@@ -8,14 +8,14 @@ import (
 
 // Config holds all configuration options for tezos-datasets
 type Config struct {
-	NodeAddresses   []string // Parsed from --node (expand port range)
-	NumFetchers     int      // -n flag (default 16)
-	OutputDir       string   // --output-dir
-	EnableBlocks    bool     // --blocks
-	EnableContracts bool     // --contracts
-	EnableIPFS      bool     // --ipfs-metadata
-	IPFSNodes       []string // --ipfs-node (multiple)
-	StartFrom       int64    // --start-from (optional, -1 means use saved state)
+	NodeAddresses      []string // Parsed from --node (expand port range)
+	NumFetchers        int      // -n flag (default 16)
+	OutputDir          string   // --output-dir
+	EnableBlocks       bool     // --blocks
+	EnableContracts    bool     // --contracts
+	EnableIPFS         bool     // --ipfs-metadata
+	IPFSBootstrapPeers []string // --ipfs-bootstrap (optional custom bootstrap peers)
+	StartFrom          int64    // --start-from (optional, -1 means use saved state)
 }
 
 // ParseNodeAddress parses a node address that may contain a port range.
